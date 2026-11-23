@@ -1,66 +1,85 @@
 package com.example.addon.modules;
 
 import com.example.addon.AddonTemplate;
+import meteordevelopment.meteorclient.events.packets.PacketEvent;
 import meteordevelopment.meteorclient.events.render.Render3DEvent;
 import meteordevelopment.meteorclient.renderer.ShapeMode;
-import meteordevelopment.meteorclient.settings.ColorSetting;
-import meteordevelopment.meteorclient.settings.DoubleSetting;
-import meteordevelopment.meteorclient.settings.Setting;
-import meteordevelopment.meteorclient.settings.SettingGroup;
+import meteordevelopment.meteorclient.settings.*;
 import meteordevelopment.meteorclient.systems.modules.Module;
-import meteordevelopment.meteorclient.utils.render.color.Color;
 import meteordevelopment.meteorclient.utils.render.color.SettingColor;
 import meteordevelopment.orbit.EventHandler;
-import net.minecraft.core.BlockPos;
-import net.minecraft.world.phys.AABB;
+import net.minecraft.block.Blocks;
+import net.minecraft.network.packet.s2c.play.BlockEventS2CPacket;
+import net.minecraft.network.packet.s2c.play.PlaySoundS2CPacket;
+import net.minecraft.util.math.BlockPos;
 
-public class ModuleExample extends Module {
-    private final SettingGroup sgGeneral = this.settings.getDefaultGroup();
-    private final SettingGroup sgRender = this.settings.createGroup("Render");
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
-    /**
-     * Example setting.
-     * The {@code name} parameter should be in kebab-case.
-     * If you want to access the setting from another class, simply make the setting {@code public}, and use
-     * {@link meteordevelopment.meteorclient.systems.modules.Modules#get(Class)} to access the {@link Module} object.
-     */
-    private final Setting<Double> scale = sgGeneral.add(new DoubleSetting.Builder()
-        .name("scale")
-        .description("The size of the marker.")
-        .defaultValue(2.0d)
-        .range(0.5d, 10.0d)
-        .build()
-    );
+public class UndergroundDetector extends Module {
+    private final SettingGroup sgGeneral = settings.getDefaultGroup();
+    private final SettingGroup sgRender = settings.createGroup("Render");
+
+    private final Setting<Integer> maxY = sgGeneral.add(new IntSetting.Builder()
+        .name("max-y")
+        .description("Detektuje samo ispod ovog Y nivoa.")
+        .defaultValue(0)
+        .sliderRange(-64, 64)
+        .build());
+
+    private final Setting<Boolean> pistons = sgGeneral.add(new BoolSetting.Builder()
+        .name("pistons").description("Detektuj pistone.").defaultValue(true).build());
+
+    private final Setting<Boolean> sounds = sgGeneral.add(new BoolSetting.Builder()
+        .name("sounds").description("Detektuj zvukove (kopanje, sanduci...).").defaultValue(true).build());
+
+    private final Setting<Boolean> chat = sgGeneral.add(new BoolSetting.Builder()
+        .name("chat-alert").description("Piši koordinate u chat.").defaultValue(true).build());
+
+    private final Setting<Integer> lifetime = sgGeneral.add(new IntSetting.Builder()
+        .name("lifetime-seconds").description("Koliko dugo ostaje marker.").defaultValue(30).min(1).sliderMax(120).build());
 
     private final Setting<SettingColor> color = sgRender.add(new ColorSetting.Builder()
-        .name("color")
-        .description("The color of the marker.")
-        .defaultValue(Color.MAGENTA)
-        .build()
-    );
+        .name("color").defaultValue(new SettingColor(255, 80, 0, 80)).build());
 
-    /**
-     * The {@code name} parameter should be in kebab-case.
-     */
-    public ModuleExample() {
-        super(AddonTemplate.CATEGORY, "world-origin", "An example module that highlights the center of the world.");
+    private final Map<BlockPos, Long> hits = new ConcurrentHashMap<>();
+
+    public UndergroundDetector() {
+        super(AddonTemplate.CATEGORY, "underground-detector", "Detektuje piston i zvuk aktivnost ispod zemlje.");
     }
 
-    /**
-     * Example event handling method.
-     * Requires {@link AddonTemplate#getPackage()} to be setup correctly, otherwise the game will crash whenever the module is enabled.
-     */
-    @EventHandler
-    private void onRender3d(Render3DEvent event) {
-        // Create & expand the marker object
-        AABB marker = new AABB(BlockPos.ZERO);
-        marker = marker.expandTowards(
-            scale.get() * marker.getXsize(),
-            scale.get() * marker.getYsize(),
-            scale.get() * marker.getZsize()
-        );
+    @Override
+    public void onDeactivate() {
+        hits.clear();
+    }
 
-        // Render the marker based on the color setting
-        event.renderer.box(marker, color.get(), color.get(), ShapeMode.Both, 0);
+    @EventHandler
+    private void onPacket(PacketEvent.Receive event) {
+        if (pistons.get() && event.packet instanceof BlockEventS2CPacket p) {
+            if (p.getPos().getY() > maxY.get()) return;
+            if (p.getBlock() == Blocks.PISTON || p.getBlock() == Blocks.STICKY_PISTON) {
+                add(p.getPos().toImmutable(), "Piston");
+            }
+        }
+
+        if (sounds.get() && event.packet instanceof PlaySoundS2CPacket s) {
+            if (s.getY() > maxY.get()) return;
+            add(BlockPos.ofFloored(s.getX(), s.getY(), s.getZ()), "Zvuk");
+        }
+    }
+
+    private void add(BlockPos pos, String type) {
+        if (hits.put(pos, System.currentTimeMillis()) == null && chat.get()) {
+            info("%s na (%d, %d, %d)", type, pos.getX(), pos.getY(), pos.getZ());
+        }
+    }
+
+    @EventHandler
+    private void onRender(Render3DEvent event) {
+        long now = System.currentTimeMillis();
+        hits.entrySet().removeIf(e -> now - e.getValue() > lifetime.get() * 1000L);
+        for (BlockPos pos : hits.keySet()) {
+            event.renderer.box(pos, color.get(), color.get(), ShapeMode.Both, 0);
+        }
     }
 }
